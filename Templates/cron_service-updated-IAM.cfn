@@ -1,0 +1,475 @@
+{
+  "Description": "Genius Group Cron Job Server Scaling Group",
+  "Parameters": {
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    },
+    "AppSubnet": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "Subnets for Application"
+    },
+    "S3Bucket": {
+      "Description": "S3 Bucket for Configs and CronJobs",
+      "Default": "rax-984294-config",
+      "Type": "String"
+    },
+    "S3BucketPath": {
+      "Description": "Path in S3 bucket where cronjobs are stored",
+      "Default": "cronjobs/jobs.txt",
+      "Type": "String"
+    },
+    "thisVpc": {
+      "Description": "Choose the VPC",
+      "Type": "AWS::EC2::VPC::Id"
+    },
+    "cronVersion": {
+      "Description": "Version number for the environment",
+      "Default": "1.0",
+      "Type": "String"
+    },
+    "NameTag": {
+      "Description": "What should the name tag be set to?",
+      "Default": "CronServer",
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "CronServerLaunchConfig": {
+      "DependsOn": "InstanceRoleInstanceProfile",
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": {
+        "updateId": {
+          "Ref": "cronVersion"
+        },
+        "AWS::CloudFormation::Authentication": {
+          "S3Access": {
+            "type": "S3",
+            "buckets": [
+              {
+                "Ref": "S3Bucket"
+              }
+            ],
+            "roleName": {
+              "Ref": "InstanceRole"
+            }
+          }
+        },
+        "AWS::CloudFormation::Init": {
+          "configSets": {
+            "Init": [
+              "cfnConfig",
+              "EnableCloudWatch",
+              "scaleFTconfig",
+              "cronJobs"
+            ],
+            "Update": [
+              "cfnConfig",
+              "EnableCloudWatch",
+              "cronJobs"
+            ]
+          },
+          "cfnConfig": {
+            "files": {
+              "/etc/cfn/cfn-hup.conf": {
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "[main]\n",
+                      "stack=",
+                      {
+                        "Ref": "AWS::StackId"
+                      },
+                      "\n",
+                      "region=",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      "\n"
+                    ]
+                  ]
+                },
+                "mode": "000400",
+                "owner": "root",
+                "group": "root"
+              },
+              "/etc/cfn/hooks.d/cfn-auto-reloader.conf": {
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "[cfn-auto-reloader-hook]\n",
+                      "triggers=post.update\n",
+                      "path=Resources.CronServerLaunchConfig.Metadata.updateId\n",
+                      "action=/opt/aws/bin/cfn-init -v ",
+                      "         --configsets Update",
+                      "         --stack ",
+                      {
+                        "Ref": "AWS::StackName"
+                      },
+                      "         --resource CronServerLaunchConfig ",
+                      "         --region ",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      "\n",
+                      "runas=root\n"
+                    ]
+                  ]
+                }
+              }
+            },
+            "services": {
+              "sysvinit": {
+                "cfn-hup": {
+                  "enabled": "true",
+                  "ensureRunning": "true",
+                  "files": [
+                    "/etc/cfn/cfn-hup.conf",
+                    "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+                  ]
+                }
+              }
+            }
+          },
+          "EnableCloudWatch": {
+            "commands": {
+              "01_InstalCloudWatchLogs": {
+                "command": "yum install -y awslogs",
+                "ignoreErrors": "false"
+              },
+              "02_set_cwl_region": {
+                "command": "/tmp/setLogsRegion"
+              }
+            },
+            "files": {
+              "/etc/awslogs/awslogs.conf": {
+                "source": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "https://s3-",
+                      {
+                        "Ref": "AWS::Region"
+                      },
+                      ".amazonaws.com/",
+                      {
+                        "Ref": "S3Bucket"
+                      },
+                      "/cloudwatch/awslogs.conf"
+                    ]
+                  ]
+                },
+                "mode": "000644",
+                "owner": "root",
+                "group": "root",
+                "authentication": "S3Access"
+              },
+              "/tmp/setLogsRegion": {
+                "mode": "0000755",
+                "owner": "root",
+                "group": "root",
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "#!/bin/bash",
+                      "\n",
+                      "export awscli=/etc/awslogs/awscli.conf",
+                      "\n",
+                      "sed -i -e 's~region = us-east-1~region = ",
+                      { "Ref": "AWS::Region" },
+                      "~g' $awscli",
+                      "\n"
+                    ]
+                  ]
+                }
+              }
+            },
+            "services": {
+              "sysvinit": {
+                "awslogs": {
+                  "enabled": "true",
+                  "ensureRunning": "true"
+                }
+              }
+            }
+          },
+          "scaleFTconfig": {
+            "files": {
+              "/tmp/install_scale.sh": {
+                "mode": "000755",
+                "owner": "root",
+                "group": "root",
+                "content": {
+                  "Fn::Join": [
+                    "\n",
+                    [
+                      "#!/bin/bash",
+                      "mkdir -p /etc/sft",
+                      "echo 'InitialURL: https://scaleft.api.manage.rackspace.com' > /etc/sft/sftd.yaml",
+                      "yum install -v -y https://dist.scaleft.com/server-tools/linux/latest/scaleft-server-tools-latest.x86_64.rpm"
+                    ]
+                  ]
+                }
+              }
+            },
+            "commands": {
+              "01_install_scale_ft": {
+                "command": "/tmp/install_scale.sh"
+              }
+            }
+          },
+          "cronJobs": {
+            "files": {
+              "/usr/local/bin/updatecron": {
+                "mode": "000755",
+                "owner": "root",
+                "group": "root",
+                "content": {
+                  "Fn::Join": [
+                    "\n",
+                    [
+                      "#!/bin/bash",
+                      "hash=$(crontab -u $1 -l | md5sum)",
+                      "aws s3 cp s3://$2 /tmp/$1.cronjobs",
+                      "newhash=$(cat /tmp/$1.cronjobs | md5sum)",
+                      "if [ ! \"$hash\" == \"$newhash\" ]",
+                      "then",
+                      "   echo 'Updating cron jobs'",
+                      "   crontab -u $1 /tmp/$1.cronjobs",
+                      "else",
+                      "   echo 'No cron updates'",
+                      "fi"
+                    ]
+                  ]
+                }
+              },
+              "/etc/cron.d/updatecron-root": {
+                "mode": "000644",
+                "owner": "root",
+                "group": "root",
+                "content": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "* * * * * root /usr/local/bin/updatecron root ",
+                      { "Ref": "S3Bucket" },
+                      "/",
+                      { "Ref": "S3BucketPath" }, "\n"
+                    ]
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId": "ami-48d38c2b",
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": "t2.micro",
+        "IamInstanceProfile": {
+          "Ref": "InstanceRoleInstanceProfile"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "CronServerSecurityGroup"
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -xe\n",
+                "yum update -y aws-cfn-bootstrap\n",
+                "/opt/aws/bin/cfn-init -v --configsets Init",
+                " --stack ",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                " --resource CronServerLaunchConfig ",
+                " --region ",
+                {
+                  "Ref": "AWS::Region"
+                },
+                "\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "CronServerScalingGroup": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AvailabilityZones": {
+          "Fn::GetAZs": {
+            "Ref": "AWS::Region"
+          }
+        },
+        "Cooldown": "900",
+        "HealthCheckType": "EC2",
+        "MaxSize": "1",
+        "MinSize": "1",
+        "VPCZoneIdentifier": [
+          {
+            "Fn::Select": [
+              "0",
+              {
+                "Ref": "AppSubnet"
+              }
+            ]
+          },
+          {
+            "Fn::Select": [
+              "1",
+              {
+                "Ref": "AppSubnet"
+              }
+            ]
+          }
+        ],
+        "LaunchConfigurationName": {
+          "Ref": "CronServerLaunchConfig"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "NameTag"
+            },
+            "PropagateAtLaunch": "true"
+          }
+        ]
+      }
+    },
+    "CronServerSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security Group for Cron Instance",
+        "VpcId": { "Ref": "thisVpc" }
+      }
+    },
+    "InstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/"
+      }
+    },
+    "InstanceRolePolicies": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "InstanceRole",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "cloudwatch:PutMetricData"
+              ],
+              "Resource": [
+                "*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:DescribeLogGroups",
+                "logs:DescribeLogStreams",
+                "logs:PutLogEvents",
+                "ssm:ListAssociations"
+              ],
+              "Resource": [
+                "*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::*"
+              ]
+            },
+            {
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:aws:s3:::",
+                    {
+                      "Ref": "S3Bucket"
+                    }
+                  ]
+                ]
+              },
+              "Effect": "Allow"
+            },
+            {
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:aws:s3:::",
+                    {
+                      "Ref": "S3Bucket"
+                    },
+                    "/*"
+                  ]
+                ]
+              },
+              "Effect": "Allow"
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "InstanceRole"
+          }
+        ]
+      }
+    },
+    "InstanceRoleInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "InstanceRole"
+          }
+        ]
+      }
+    }
+  }
+}
